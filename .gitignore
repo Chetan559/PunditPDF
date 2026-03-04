@@ -248,3 +248,7 @@ temp/
 
 
 Tools.ipynb
+
+logs/
+chroma/
+chroma_db/
