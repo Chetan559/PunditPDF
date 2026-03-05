@@ -9,25 +9,28 @@ from app.middlewares.logging import setup_logger, add_request_logging
 from app.middlewares.rate_limit import add_rate_limiting
 from app.routers.document.routes import router as document_router
 
-# ── Import ALL models before create_tables() ──────────────────────────────────
-import app.models.user   # noqa: F401
-import app.models.pdf    # noqa: F401
-import app.models.chunk  # noqa: F401
+# ── Models must be imported before create_tables() in dependency order ─────────
+import app.models.user      # noqa: F401  ← no dependencies
+import app.models.pdf       # noqa: F401  ← needs users
+import app.models.chunk     # noqa: F401  ← needs pdfs
+import app.models.chat      # noqa: F401  ← needs users, pdfs
+import app.models.citation  # noqa: F401  ← needs chat_messages, pdf_chunks
+import app.models.quiz      # noqa: F401  ← needs users, pdfs
 
 settings = get_settings()
 
 
 async def seed_default_user():
-    """Create default_user if it doesn't exist — used until real auth is added."""
+    """Insert default_user row — placeholder until real auth is added."""
     from sqlalchemy import select
     from app.models.user import User
 
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(User).where(User.id == "default_user"))
-        if not result.scalar_one_or_none():
+        exists = await db.execute(select(User).where(User.id == "default_user"))
+        if not exists.scalar_one_or_none():
             db.add(User(id="default_user", email="default@local.dev", name="Default User"))
             await db.commit()
-            logger.info("Default user created")
+            logger.info("Default user seeded")
 
 
 @asynccontextmanager

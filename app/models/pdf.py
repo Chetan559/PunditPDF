@@ -1,7 +1,8 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Integer, Boolean, Text, DateTime, ForeignKey
+from sqlalchemy import String, Integer, Boolean, Text, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.types import DateTime
 from app.core.database import Base
 
 
@@ -14,11 +15,14 @@ class PDF(Base):
     file_path: Mapped[str] = mapped_column(Text, nullable=False)
     file_size: Mapped[int | None] = mapped_column(Integer)
     total_pages: Mapped[int | None] = mapped_column(Integer)
-    pdf_type: Mapped[str | None] = mapped_column(String(50))       # digital | scanned | handwritten
+    pdf_type: Mapped[str | None] = mapped_column(String(50))
     ocr_applied: Mapped[bool] = mapped_column(Boolean, default=False)
-    status: Mapped[str] = mapped_column(String(50), default="queued")  # queued | processing | ready | failed
+    status: Mapped[str] = mapped_column(String(50), default="queued")
     status_message: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    user: Mapped["User"] = relationship("User", back_populates="pdfs")
     chunks: Mapped[list["Chunk"]] = relationship("Chunk", back_populates="pdf", cascade="all, delete-orphan")
+    chat_sessions: Mapped[list["ChatSession"]] = relationship("ChatSession", back_populates="pdf", cascade="all, delete-orphan")
+    quiz_sessions: Mapped[list["QuizSession"]] = relationship("QuizSession", back_populates="pdf", cascade="all, delete-orphan")
