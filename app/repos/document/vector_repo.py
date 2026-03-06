@@ -1,118 +1,105 @@
-import asyncio
-import chromadb
-from chromadb.config import Settings as ChromaSettings
+import uuid
 from loguru import logger
-from app.core.config import get_settings
-
-settings = get_settings()
+from qdrant_client import AsyncQdrantClient
+from qdrant_client.http import models
 
 
 class VectorRepo:
     def __init__(self):
-        # Initialize the sync client eagerly on the main thread.
-        # Lazy init inside a run_in_executor thread causes chromadb 1.x
-        # to conflict with the running asyncio event loop during first-time
-        # setup (SQLite WAL init, HNSW segment loading, etc.).
-        self._client = chromadb.PersistentClient(
-            path=settings.CHROMA_PERSIST_DIR,
-            settings=ChromaSettings(anonymized_telemetry=False),
-        )
+        self.client = AsyncQdrantClient(path="./qdrant_db")
 
-    def _get_collection(self, pdf_id: str):
-        return self._client.get_or_create_collection(
-            name=f"pdf_{pdf_id}",
-            metadata={"hnsw:space": "cosine"},
-        )
-
-    # ── Sync helpers — always call via asyncio.to_thread() ────────────────────
-
-    def _add_sync(self, pdf_id: str, chunks: list[dict], embeddings: list[list[float]]):
-        collection = self._get_collection(pdf_id)
-        collection.add(
-            ids=[c["chunk_id"] for c in chunks],
-            embeddings=embeddings,
-            documents=[c["text"] for c in chunks],
-            metadatas=[
-                {
-                    "page_number": c["page_number"],
-                    "x0": c["bbox"].get("x0", 0),
-                    "y0": c["bbox"].get("y0", 0),
-                    "x1": c["bbox"].get("x1", 0),
-                    "y1": c["bbox"].get("y1", 0),
-                }
-                for c in chunks
-            ],
-        )
-        logger.info(f"ChromaDB: stored {len(chunks)} vectors for PDF {pdf_id}")
-
-    def _query_sync(self, pdf_id: str, embedding: list[float], top_k: int) -> dict | None:
-        collection = self._get_collection(pdf_id)
-        count = collection.count()
-        if count == 0:
-            return None
-        return collection.query(
-            query_embeddings=[embedding],
-            n_results=min(top_k, count),
-            include=["documents", "metadatas", "distances"],
-        )
-
-    def _delete_sync(self, pdf_id: str):
-        try:
-            self._client.delete_collection(f"pdf_{pdf_id}")
-        except Exception as e:
-            logger.warning(f"Could not delete collection pdf_{pdf_id}: {e}")
-
-    def _get_all_sync(self, pdf_id: str, limit: int) -> list[dict]:
-        collection = self._get_collection(pdf_id)
-        results = collection.get(limit=limit, include=["documents", "metadatas"])
-        chunks = []
-        for i, cid in enumerate(results["ids"]):
-            meta = results["metadatas"][i]
-            chunks.append({
-                "chunk_id": cid,
-                "text": results["documents"][i],
-                "page_number": meta["page_number"],
-            })
-        return sorted(chunks, key=lambda x: x["page_number"])
-
-    # ── Async API — used everywhere in the FastAPI app ────────────────────────
+    async def _ensure_collection(self, collection_name: str):
+        exists = await self.client.collection_exists(collection_name)
+        if not exists:
+            await self.client.create_collection(
+                collection_name=collection_name,
+                vectors_config=models.VectorParams(
+                    size=768,
+                    distance=models.Distance.COSINE,
+                ),
+            )
 
     async def add(self, pdf_id: str, chunks: list[dict]):
         from app.services.embedding_service import embedding_service
 
+        collection_name = f"pdf_{pdf_id}"
+        await self._ensure_collection(collection_name)
+
         texts = [c["text"] for c in chunks]
         embeddings = await embedding_service.embed_documents(texts)
 
-        logger.info(f"Writing {len(chunks)} vectors to ChromaDB...")
-        await asyncio.to_thread(self._add_sync, pdf_id, chunks, embeddings)
+        points = []
+        for i, c in enumerate(chunks):
+            point_id = c.get("chunk_id") or str(uuid.uuid4())
+            points.append(
+                models.PointStruct(
+                    id=point_id,
+                    vector=embeddings[i],
+                    payload={
+                        "text": c["text"],
+                        "page_number": int(c.get("page_number", 1)),
+                        "bbox": c.get("bbox") or {"x0": 0.0, "y0": 0.0, "x1": 0.0, "y1": 0.0},
+                    },
+                )
+            )
+
+        logger.info(f"Writing {len(points)} vectors to Qdrant...")
+        await self.client.upsert(collection_name=collection_name, points=points)
+        logger.info(f"Qdrant: stored {len(points)} vectors for PDF {pdf_id}")
 
     async def query(self, pdf_id: str, query_text: str, top_k: int = 5) -> list[dict]:
         from app.services.embedding_service import embedding_service
 
-        embedding = await embedding_service.embed_query(query_text)
-        results = await asyncio.to_thread(self._query_sync, pdf_id, embedding, top_k)
-
-        if not results:
+        collection_name = f"pdf_{pdf_id}"
+        if not await self.client.collection_exists(collection_name):
             return []
 
+        embedding = await embedding_service.embed_query(query_text)
+
+        # query_points replaced search() in qdrant-client >= 1.7
+        results = await self.client.query_points(
+            collection_name=collection_name,
+            query=embedding,
+            limit=top_k,
+            with_payload=True,
+        )
+
         chunks = []
-        for i, cid in enumerate(results["ids"][0]):
-            meta = results["metadatas"][0][i]
+        for hit in results.points:
             chunks.append({
-                "chunk_id": cid,
-                "text": results["documents"][0][i],
-                "page_number": meta["page_number"],
-                "bbox": {"x0": meta["x0"], "y0": meta["y0"], "x1": meta["x1"], "y1": meta["y1"]},
-                "score": round(1 - results["distances"][0][i], 4),
+                "chunk_id": str(hit.id),
+                "text": hit.payload.get("text", ""),
+                "page_number": hit.payload.get("page_number", 1),
+                "bbox": hit.payload.get("bbox", {"x0": 0.0, "y0": 0.0, "x1": 0.0, "y1": 0.0}),
+                "score": round(hit.score, 4),
             })
         return chunks
 
     async def get_all(self, pdf_id: str, limit: int = 50) -> list[dict]:
-        return await asyncio.to_thread(self._get_all_sync, pdf_id, limit)
+        collection_name = f"pdf_{pdf_id}"
+        if not await self.client.collection_exists(collection_name):
+            return []
+
+        results, _ = await self.client.scroll(
+            collection_name=collection_name,
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        )
+        return sorted([
+            {
+                "chunk_id": str(hit.id),
+                "text": hit.payload.get("text", ""),
+                "page_number": hit.payload.get("page_number", 1),
+            }
+            for hit in results
+        ], key=lambda x: x["page_number"])
 
     async def delete_collection(self, pdf_id: str):
-        await asyncio.to_thread(self._delete_sync, pdf_id)
-        logger.info(f"Deleted ChromaDB collection for PDF {pdf_id}")
+        collection_name = f"pdf_{pdf_id}"
+        if await self.client.collection_exists(collection_name):
+            await self.client.delete_collection(collection_name=collection_name)
+            logger.info(f"Deleted Qdrant collection for PDF {pdf_id}")
 
 
 vector_repo = VectorRepo()

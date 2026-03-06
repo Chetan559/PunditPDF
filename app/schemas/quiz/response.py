@@ -1,41 +1,54 @@
 from pydantic import BaseModel
 from datetime import datetime
-from app.schemas.common import BBox
 
 
-class CitationResponse(BaseModel):
+class QuizQuestionResponse(BaseModel):
     id: str
-    chunk_id: str | None
-    page_number: int
-    bbox: BBox
-    cited_text: str
-    relevance_score: float | None
-    is_primary: bool
+    question_index: int
+    question_text: str
+    question_type: str
+    difficulty: str
+    options: list[str] | None
+    source_page: int | None
+
+    class Config:
+        from_attributes = True
 
 
-class ChatMessageResponse(BaseModel):
+class QuizSessionResponse(BaseModel):
     id: str
-    role: str                           # user | assistant
-    content: str
-    mode: str | None                    # rag | continuation
-    follow_up: str | None
-    citations: list[CitationResponse]
+    pdf_id: str
+    status: str
+    question_count: int
+    questions: list[QuizQuestionResponse]
     created_at: datetime
 
     class Config:
         from_attributes = True
 
 
-class ChatResponse(BaseModel):
-    session_id: str
-    message_id: str
-    answer: str
-    mode: str                           # rag | continuation
-    citations: list[CitationResponse]
-    follow_up: str | None
+class QuizAppendResponse(BaseModel):
+    id: str
+    question_count: int
+    new_questions_added: int
+    questions: list[QuizQuestionResponse]
 
 
-class ChatHistoryResponse(BaseModel):
+class PerQuestionResult(BaseModel):
+    question_id: str
+    question_text: str
+    is_correct: bool
+    user_answer: str | None
+    correct_answer: str
+    explanation: str | None
+
+
+class QuizResultResponse(BaseModel):
     session_id: str
-    pdf_id: str
-    messages: list[ChatMessageResponse]
+    score: int
+    total: int
+    percentage: float
+    grade: str
+    per_question: list[PerQuestionResult]
+    weak_topics: list[str]
+    recommendation: str

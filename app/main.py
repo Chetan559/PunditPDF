@@ -9,8 +9,9 @@ from app.middlewares.logging import setup_logger, add_request_logging
 from app.middlewares.rate_limit import add_rate_limiting
 from app.routers.document.routes import router as document_router
 from app.routers.chat.routes import router as chat_router
+from app.routers.quiz.routes import router as quiz_router
+from app.routers.health import router as health_router
 
-# ── Models in dependency order ────────────────────────────────────────────────
 import app.models.user      # noqa: F401
 import app.models.pdf       # noqa: F401
 import app.models.chunk     # noqa: F401
@@ -35,7 +36,7 @@ async def seed_default_user():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logger()
-    logger.info(f"Starting PDF Chat API — env: {settings.APP_ENV}")
+    logger.info(f"Starting DocuMind API — env: {settings.APP_ENV}")
     await create_tables()
     await seed_default_user()
     logger.info("Database ready")
@@ -44,7 +45,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="PDF Chat API",
+    title="DocuMind API",
     version="1.0.0",
     lifespan=lifespan,
     docs_url="/docs",
@@ -55,9 +56,10 @@ add_cors(app)
 add_rate_limiting(app)
 add_request_logging(app)
 
+app.include_router(health_router)
 app.include_router(document_router)
 app.include_router(chat_router)
-
+app.include_router(quiz_router)
 
 if __name__ == "__main__":
     import uvicorn
