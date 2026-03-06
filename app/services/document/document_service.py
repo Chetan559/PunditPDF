@@ -1,7 +1,9 @@
+import threading
+import asyncio
 import os
 import uuid
 import aiofiles
-from fastapi import UploadFile, BackgroundTasks
+from fastapi import UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 from loguru import logger
 
@@ -30,7 +32,6 @@ class DocumentService:
         db: AsyncSession,
         file: UploadFile,
         user_id: str,
-        background_tasks: BackgroundTasks,
     ) -> dict:
         self._validate_file(file)
 
@@ -55,18 +56,41 @@ class DocumentService:
         })
         await db.commit()
 
-        background_tasks.add_task(self._process, pdf_id, file_path)
-        logger.info(f"PDF {pdf_id} uploaded, processing queued")
+        # Spawn a dedicated daemon thread with its own asyncio event loop.
+        # This completely isolates heavy PDF processing (OCR, HNSW indexing)
+        # from FastAPI's event loop — GIL-holding ops in the daemon thread
+        # cannot starve the main loop.
+        thread = threading.Thread(
+            target=lambda: asyncio.run(self._process(pdf_id, file_path)),
+            daemon=True,
+            name=f"pdf-worker-{pdf_id[:8]}",
+        )
+        thread.start()
+        logger.info(f"PDF {pdf_id} uploaded, processing thread started")
         return {"id": pdf_id, "name": file.filename, "status": "queued"}
 
     async def _process(self, pdf_id: str, file_path: str):
-        from app.core.database import AsyncSessionLocal
-        async with AsyncSessionLocal() as db:
+        from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+        from app.core.config import get_settings
+        
+        # We are in a new thread with a new asyncio event loop.
+        # We CANNOT use app.core.database.AsyncSessionLocal because its engine
+        # was bound to FastAPI's main loop. We must create a fresh local engine.
+        settings = get_settings()
+        local_engine = create_async_engine(
+            settings.DATABASE_URL,
+            pool_pre_ping=True,
+            pool_size=1,
+            max_overflow=2,
+        )
+        LocalSession = async_sessionmaker(local_engine, expire_on_commit=False)
+
+        async with LocalSession() as db:
             try:
                 await document_repo.update_status(db, pdf_id, "processing", "Detecting PDF type...")
                 await db.commit()
 
-                pdf_type = detect_pdf_type(file_path)
+                pdf_type = await asyncio.to_thread(detect_pdf_type, file_path)
 
                 processed_path = file_path
                 ocr_applied = False
@@ -74,17 +98,17 @@ class DocumentService:
                 if pdf_type in ("scanned", "handwritten"):
                     await document_repo.update_status(db, pdf_id, "processing", "Running OCR...")
                     await db.commit()
-                    processed_path = run_ocr(file_path)
+                    processed_path = await asyncio.to_thread(run_ocr, file_path)
                     ocr_applied = True
 
                 await document_repo.update_status(db, pdf_id, "processing", "Extracting and indexing text...")
                 await db.commit()
 
-                chunks = extract_chunks(processed_path)
+                chunks = await asyncio.to_thread(extract_chunks, processed_path)
                 if not chunks:
                     raise ValueError("No text could be extracted from this PDF")
 
-                total_pages = get_page_count(processed_path)
+                total_pages = await asyncio.to_thread(get_page_count, processed_path)
                 await indexing_service.index_chunks(db, pdf_id, chunks)
 
                 await document_repo.update_fields(db, pdf_id, {
@@ -102,6 +126,9 @@ class DocumentService:
                 logger.error(f"Processing failed for PDF {pdf_id}: {e}")
                 await document_repo.update_status(db, pdf_id, "failed", str(e))
                 await db.commit()
+            finally:
+                # Always close the local engine cleanly to release its pool
+                await local_engine.dispose()
 
     async def get_status(self, db: AsyncSession, pdf_id: str) -> dict:
         pdf = await document_repo.get_by_id(db, pdf_id)
@@ -145,7 +172,7 @@ class DocumentService:
             except Exception as e:
                 logger.warning(f"Could not remove file {path}: {e}")
 
-        indexing_service.delete_index(pdf_id)
+        await indexing_service.delete_index(pdf_id)
         await document_repo.delete(db, pdf_id)
         await db.commit()
 

@@ -8,23 +8,22 @@ from app.middlewares.cors import add_cors
 from app.middlewares.logging import setup_logger, add_request_logging
 from app.middlewares.rate_limit import add_rate_limiting
 from app.routers.document.routes import router as document_router
+from app.routers.chat.routes import router as chat_router
 
-# ── Models must be imported before create_tables() in dependency order ─────────
-import app.models.user      # noqa: F401  ← no dependencies
-import app.models.pdf       # noqa: F401  ← needs users
-import app.models.chunk     # noqa: F401  ← needs pdfs
-import app.models.chat      # noqa: F401  ← needs users, pdfs
-import app.models.citation  # noqa: F401  ← needs chat_messages, pdf_chunks
-import app.models.quiz      # noqa: F401  ← needs users, pdfs
+# ── Models in dependency order ────────────────────────────────────────────────
+import app.models.user      # noqa: F401
+import app.models.pdf       # noqa: F401
+import app.models.chunk     # noqa: F401
+import app.models.chat      # noqa: F401
+import app.models.citation  # noqa: F401
+import app.models.quiz      # noqa: F401
 
 settings = get_settings()
 
 
 async def seed_default_user():
-    """Insert default_user row — placeholder until real auth is added."""
     from sqlalchemy import select
     from app.models.user import User
-
     async with AsyncSessionLocal() as db:
         exists = await db.execute(select(User).where(User.id == "default_user"))
         if not exists.scalar_one_or_none():
@@ -57,6 +56,7 @@ add_rate_limiting(app)
 add_request_logging(app)
 
 app.include_router(document_router)
+app.include_router(chat_router)
 
 
 if __name__ == "__main__":
