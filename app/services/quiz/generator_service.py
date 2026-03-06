@@ -36,7 +36,7 @@ class GeneratorService:
         exclude_questions = exclude_questions or []
 
         # Pull chunks from Qdrant
-        chunks = vector_repo.get_all(pdf_id, limit=40)
+        chunks = await vector_repo.get_all(pdf_id, limit=40)
         if not chunks:
             logger.warning(f"No chunks found for PDF {pdf_id} — cannot generate questions")
             return []

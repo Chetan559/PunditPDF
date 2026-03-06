@@ -17,7 +17,8 @@ class QuizSessionRepo:
         result = await db.execute(
             select(QuizSession)
             .where(QuizSession.id == session_id)
-            .options(selectinload(QuizSession.questions))
+            # FIX: Added selectinload(QuizSession.pdf) so the recommendation service can access it
+            .options(selectinload(QuizSession.questions), selectinload(QuizSession.pdf))
         )
         return result.scalar_one_or_none()
 
